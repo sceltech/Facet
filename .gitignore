@@ -1,0 +1,10 @@
+# Build output
+.build/
+*.app
+*.zip
+.swiftpm/
+.DS_Store
+
+# Icon previews (icon_1024.png is the real one)
+Icon/icon_a.png
+Icon/simple_*.png
