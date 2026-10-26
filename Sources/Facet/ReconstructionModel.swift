@@ -1,6 +1,8 @@
 import Foundation
 import RealityKit
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 enum DetailLevel: String, CaseIterable, Identifiable {
     case preview, reduced, medium, full
@@ -89,11 +91,17 @@ final class ReconstructionModel: ObservableObject {
 
     // Result & export
     @Published var result: ReconstructionResult?
-    @Published var scaleFactor: Double = 1
+    @Published var scaleFactor: Double = 1 {
+        didSet { if result != nil && scaleFactor != oldValue { isDirty = true } }
+    }
     @Published var exportOptions = ExportOptions()
     @Published var isExporting = false
     @Published var exportMessage: String?
     @Published var lastExportFolder: URL?
+
+    // Project file
+    @Published var projectURL: URL?
+    @Published var isDirty = false
 
     private var session: PhotogrammetrySession?
     private var progressByRequest: [String: Double] = [:]
@@ -108,6 +116,8 @@ final class ReconstructionModel: ObservableObject {
     }
 
     func setFolder(_ url: URL) {
+        guard confirmDiscardIfNeeded("choosing new photos") else { return }
+        projectURL = nil
         inputFolder = url
         imageStats = ImageStats.scan(url)
         exportOptions.name = url.lastPathComponent
@@ -117,10 +127,16 @@ final class ReconstructionModel: ObservableObject {
         progress = 0
         log = []
         exportMessage = nil
+        isDirty = false
     }
 
     func start() {
         guard let input = inputFolder else { return }
+        if result != nil {
+            guard confirmDiscardIfNeeded("starting a new reconstruction") else { return }
+        }
+        projectURL = nil
+        isDirty = false
         let fm = FileManager.default
         if let old = workDir { try? fm.removeItem(at: old) }
 
@@ -278,10 +294,143 @@ final class ReconstructionModel: ObservableObject {
                 progress = 1
                 stageText = "Done."
                 phase = .finished
+                isDirty = true
             case .failure(let error):
                 fail("Could not load model: \(error.localizedDescription)")
             }
         }
+    }
+
+    // MARK: - Project files
+
+    func save() {
+        if let url = projectURL {
+            writeProject(to: url)
+        } else {
+            saveAs()
+        }
+    }
+
+    func saveAs() {
+        guard result != nil else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.facetProject]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = (projectURL?.deletingPathExtension().lastPathComponent
+                                      ?? MeshExporter.sanitize(exportOptions.name)) + ".facet"
+        panel.message = "Saves the 3D model, textures and settings so you can reopen it later."
+        if panel.runModal() == .OK, let url = panel.url {
+            writeProject(to: url)
+        }
+    }
+
+    func openProjectPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.facetProject]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Open a Facet project"
+        if panel.runModal() == .OK, let url = panel.url {
+            openProject(at: url)
+        }
+    }
+
+    func openProject(at url: URL) {
+        guard phase != .running else { return }
+        guard confirmDiscardIfNeeded("opening another project") else { return }
+        let fm = FileManager.default
+        if let old = workDir { try? fm.removeItem(at: old) }
+        let work = fm.temporaryDirectory
+            .appendingPathComponent("Facet", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        workDir = work
+        Task {
+            let loaded = await Task.detached(priority: .userInitiated) { () -> Result<LoadedProject, Error> in
+                Result { try ProjectIO.load(from: url, into: work) }
+            }.value
+            switch loaded {
+            case .success(let project):
+                apply(project, from: url)
+            case .failure(let error):
+                showError("Could not open “\(url.lastPathComponent)”", error)
+            }
+        }
+    }
+
+    /// Asks to save unsaved results. Returns false if the user cancelled.
+    func confirmDiscardIfNeeded(_ context: String) -> Bool {
+        guard isDirty, result != nil else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Save the 3D model before \(context)?"
+        alert.informativeText = "If you don't save, the reconstruction is lost and has to be computed again."
+        alert.addButton(withTitle: "Save…")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            save()
+            return !isDirty
+        case .alertSecondButtonReturn:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func writeProject(to url: URL) {
+        guard let r = result else { return }
+        let settings = ProjectSettings(
+            inputFolder: inputFolder?.path,
+            detail: detail.rawValue,
+            objectMasking: objectMasking,
+            sequentialOrdering: sequentialOrdering,
+            highSensitivity: highSensitivity,
+            scaleFactor: scaleFactor,
+            exportOptions: exportOptions)
+        do {
+            try ProjectIO.save(result: r, settings: settings, to: url)
+            projectURL = url
+            isDirty = false
+            NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        } catch {
+            showError("Could not save project", error)
+        }
+    }
+
+    private func apply(_ project: LoadedProject, from url: URL) {
+        let s = project.settings
+        if let path = s.inputFolder, FileManager.default.fileExists(atPath: path) {
+            inputFolder = URL(fileURLWithPath: path, isDirectory: true)
+            imageStats = ImageStats.scan(inputFolder!)
+        } else {
+            inputFolder = nil
+            imageStats = ImageStats()
+        }
+        detail = DetailLevel(rawValue: s.detail) ?? .medium
+        objectMasking = s.objectMasking
+        sequentialOrdering = s.sequentialOrdering
+        highSensitivity = s.highSensitivity
+        exportOptions = s.exportOptions
+        result = project.result
+        scaleFactor = s.scaleFactor
+        phase = .finished
+        progress = 1
+        stageText = "Done."
+        remainingText = ""
+        log = []
+        exportMessage = nil
+        projectURL = url
+        isDirty = false
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+    }
+
+    private func showError(_ title: String, _ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
     }
 
     private func fail(_ message: String) {

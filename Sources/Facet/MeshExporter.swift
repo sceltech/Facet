@@ -1,7 +1,7 @@
 import Foundation
 import simd
 
-enum ExportUnit: String, CaseIterable, Identifiable {
+enum ExportUnit: String, CaseIterable, Identifiable, Codable {
     case mm, cm, m
     var id: String { rawValue }
     var label: String {
@@ -21,7 +21,7 @@ enum ExportUnit: String, CaseIterable, Identifiable {
     }
 }
 
-struct ExportOptions {
+struct ExportOptions: Codable {
     var name = "Model"
     var stl = true
     var obj = true

@@ -13,8 +13,14 @@ struct ContentView: View {
             MainArea()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .navigationTitle(model.projectURL?.deletingPathExtension().lastPathComponent ?? "Facet")
+        .navigationSubtitle(model.isDirty ? "Edited" : "")
         .dropDestination(for: URL.self) { urls, _ in
             guard model.phase != .running, let url = urls.first else { return false }
+            if url.pathExtension.lowercased() == "facet" {
+                model.openProject(at: url)
+                return true
+            }
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
                   isDir.boolValue else { return false }
@@ -78,6 +84,7 @@ struct Sidebar: View {
             if model.result != nil {
                 ScaleSection()
                 ExportSection()
+                ProjectSection()
             }
         }
         .formStyle(.grouped)
@@ -187,6 +194,31 @@ struct ExportSection: View {
     }
 }
 
+// MARK: - Project
+
+struct ProjectSection: View {
+    @EnvironmentObject var model: ReconstructionModel
+
+    var body: some View {
+        Section("Project") {
+            if let url = model.projectURL {
+                LabeledContent("File", value: url.lastPathComponent)
+            }
+            HStack {
+                Button("Save Project") { model.save() }
+                if model.projectURL != nil {
+                    Button("Save As…") { model.saveAs() }
+                }
+            }
+            Text(model.isDirty
+                 ? "Unsaved changes. Save to reopen this model later without recomputing."
+                 : "All changes saved.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 // MARK: - Main area
 
 struct MainArea: View {
@@ -225,6 +257,8 @@ struct DropHint: View {
             } else {
                 Text("Drop a folder of photos here").font(.title3)
                 Text("HEIC, JPG or PNG · 20 images or more").foregroundStyle(.secondary)
+                Button("Open Project…") { model.openProjectPanel() }
+                    .padding(.top, 8)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
